@@ -17,3 +17,4 @@ frontend/playwright-report/
 .tools/
 /artifacts/generated/
 .r3-restart-state.json
+*.tsbuildinfo

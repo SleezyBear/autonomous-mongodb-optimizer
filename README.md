@@ -58,3 +58,43 @@ Every change is recorded alongside its inverse, so undoing it is a matter of app
 ## Stack
 
 FastAPI and PostgreSQL for the control plane, a background worker for the pipeline, MongoDB as the target, a locally hosted model through Ollama, and a React dashboard for runs, targets, workloads and approvals. It runs under Docker Compose.
+
+## Engineering details
+
+- **Durable orchestration.** Runs and jobs live in PostgreSQL. Workers claim jobs with leases and heartbeats, retry with backoff, and recover after a crash from persisted state. One PostgreSQL advisory lock per target guarantees a single mutation at a time.
+- **Statistical admission.** Each candidate is measured in paired, order-alternated trials on a physical copy of the monitored data. It is admitted only if a deterministic paired bootstrap (10,000 resamples, one-sided 95% bounds) shows at least a 5% gain on its declared primary metric and every protected metric passes its non-regression bound.
+- **Tamper-evident ledger.** Every production change is appended to a SHA-256 hash-chained ledger in PostgreSQL together with its exact inverse, and rollback only touches indexes the ledger proves the optimizer created.
+- **Security.** Argon2 password hashing, JWT sessions with refresh rotation, AES-256-GCM for stored control-plane secrets, and redaction of query literals before anything reaches logs or the model.
+- **Experience memory.** Past outcomes are stored as pgvector embeddings and used only to reorder existing candidates, never to add candidates or relax a check.
+- **Load qualification.** A 60-second soak served 4,444 API requests with zero failures at a p95 of 90.8 ms, with bounded PostgreSQL and MongoDB connections and no leaks after cleanup ([`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md)).
+
+## Quick start
+
+The development environment targets an Intel macOS host with Docker and a project-local `uv` (see [`docs/ENVIRONMENT_COMPATIBILITY.md`](docs/ENVIRONMENT_COMPATIBILITY.md)).
+
+```bash
+./scripts/bootstrap.sh                       # Python 3.12 environment and checks
+mkdir -p .secrets
+./nosql/bin/python scripts/generate_master_key.py --output .secrets/control_plane_master_key
+./nosql/bin/python scripts/generate_mongodb_keyfile.py --output .secrets/mongodb_replica_keyfile
+make dev                                     # PostgreSQL, monitored + evaluation MongoDB, API, worker, dashboard
+make test                                    # backend test suite
+```
+
+The API listens on `127.0.0.1:8000` and the dashboard on `127.0.0.1:5173`. Operating and production details are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components and data flow |
+| [`docs/SAFETY_CONTRACT.md`](docs/SAFETY_CONTRACT.md) | What the optimizer may and may not do to a database |
+| [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) | Admission statistics and benchmark methodology |
+| [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Threats and mitigations |
+| [`docs/API.md`](docs/API.md) | Control-plane API |
+| [`docs/DATABASE_ADAPTER_CONTRACT.md`](docs/DATABASE_ADAPTER_CONTRACT.md) | Adding support for another database |
+| [`artifacts/experiments/README.md`](artifacts/experiments/README.md) | Which experiment files are authoritative |
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
