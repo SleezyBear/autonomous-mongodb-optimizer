@@ -46,6 +46,7 @@ class RunCompletionReason(str, Enum):
     NO_ADMITTED_CANDIDATE = "NO_ADMITTED_CANDIDATE"
     DEPLOYMENT_SUCCEEDED = "DEPLOYMENT_SUCCEEDED"
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
+    APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     LEGACY_COMPLETED = "LEGACY_COMPLETED"
 
 
@@ -201,10 +202,11 @@ class WorkloadSnapshotQueryShape(TimestampedUUID):
 class WorkloadSnapshotMetric(TimestampedUUID):
     __tablename__ = "workload_snapshot_metrics"
     workload_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("workload_snapshots.id", ondelete="RESTRICT"), index=True)
-    source_metric_observation_id: Mapped[UUID] = mapped_column(ForeignKey("metric_observations.id", ondelete="RESTRICT"), unique=True)
+    source_metric_observation_id: Mapped[UUID] = mapped_column(ForeignKey("metric_observations.id", ondelete="RESTRICT"))
     scope: Mapped[str] = mapped_column(String(32))
     metric_name: Mapped[str] = mapped_column(String(64))
     metric_value: Mapped[float] = mapped_column(Numeric)
+    __table_args__ = (UniqueConstraint("workload_snapshot_id", "source_metric_observation_id", name="uq_snapshot_metric_observation"),)
 
 
 class AIInvocation(TimestampedUUID):
@@ -505,6 +507,10 @@ class Job(TimestampedUUID):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     kind: Mapped[str] = mapped_column(String(64), default="OPTIMIZATION")
+    # Retry scheduling and sanitized failure facts (migration 0012).
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditEvent(TimestampedUUID):

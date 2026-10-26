@@ -17,6 +17,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.api.operations import router as operations_router
 from app.api.routes import router as api_router
 from app.auth.routes import jwt_service
 from app.auth.routes import router as auth_router
@@ -127,6 +128,7 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 app.include_router(api_router)
+app.include_router(operations_router)
 app.add_middleware(BodyLimitMiddleware, max_bytes=_settings.max_request_body_bytes)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_settings.allowed_hosts))
 app.add_middleware(

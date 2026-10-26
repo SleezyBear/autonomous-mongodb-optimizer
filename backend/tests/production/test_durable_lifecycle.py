@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -217,7 +217,7 @@ async def test_approval_grant_is_four_eyes_and_creates_exactly_one_continuation(
         request = await service.request(action_id=str(action_id), target_id=target, candidate_id=candidate, candidate_fingerprint=f"candidate-fingerprint-{candidate.hex}", evidence_hash="authority-bound", requester_id=requester, optimization_run_id=run)
         with pytest.raises(DurableApprovalRequired):
             await service.approve_and_enqueue_continuation(request["id"], requester)
-        approved = await service.approve_and_enqueue_continuation(request["id"], approver)
+        approved = await service.approve_and_enqueue_continuation(request["id"], approver, "p99 gain verified in sandbox")
         assert approved["status"] == "APPROVED"
         adapter = FakeDatabaseAdapter((Namespace("orders"),))
         await DurableDeploymentService(engine, adapter).deploy_for_run(run, ExecutionContext(asyncio.Event()))
@@ -226,6 +226,7 @@ async def test_approval_grant_is_four_eyes_and_creates_exactly_one_continuation(
             assert (await connection.scalar(text("SELECT status::text FROM optimization_runs WHERE id=:id"), {"id": run})) == "DEPLOYED"
             assert (await connection.scalar(text("SELECT count(*) FROM jobs WHERE optimization_run_id=:id AND payload ->> 'continuation'='true'"), {"id": run})) == 1
             assert (await connection.scalar(text("SELECT count(*) FROM jobs WHERE optimization_run_id=:id"), {"id": run})) == 2
+            assert (await connection.scalar(text("SELECT reason FROM approval_decisions WHERE approval_request_id=:id"), {"id": request["id"]})) == "p99 gain verified in sandbox"
     finally:
         await engine.dispose()
 
@@ -398,5 +399,30 @@ async def test_predeployment_environment_drift_fails_before_mutation(
                 ),
                 {"id": run},
             ) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_completes_run_without_mutation(disposable_worker_database: str) -> None:
+    engine = create_async_engine(disposable_worker_database)
+    run, target, candidate = await _prepared_run(engine, approval_controlled=True)
+    try:
+        async with engine.begin() as connection:
+            requester = await connection.scalar(text("SELECT requested_by_user_id FROM optimization_runs WHERE id=:id"), {"id": run})
+            action_id = await connection.scalar(text("SELECT id FROM candidate_actions WHERE candidate_id=:id"), {"id": candidate})
+        service = DurableApprovalService(engine)
+        request = await service.request(action_id=str(action_id), target_id=target, candidate_id=candidate, candidate_fingerprint=f"candidate-fingerprint-{candidate.hex}", evidence_hash="authority-bound", requester_id=requester, optimization_run_id=run)
+        assert await service.expire_overdue() == []  # still inside the window
+        later = request["expires_at"] + timedelta(seconds=1)
+        assert await service.expire_overdue(now=later) == [run]
+        assert await service.expire_overdue(now=later) == []  # idempotent
+        async with engine.connect() as connection:
+            assert (await connection.scalar(text("SELECT status FROM approval_requests WHERE id=:id"), {"id": request["id"]})) == "EXPIRED"
+            row = (await connection.execute(text("SELECT status::text, completion_reason::text FROM optimization_runs WHERE id=:id"), {"id": run})).one()
+            assert tuple(row) == ("COMPLETED", "APPROVAL_EXPIRED")
+            assert (await connection.scalar(text("SELECT count(*) FROM approval_decisions WHERE approval_request_id=:id"), {"id": request["id"]})) == 0
+        with pytest.raises(DurableApprovalRequired):
+            await service.approve_and_enqueue_continuation(request["id"], uuid4())
     finally:
         await engine.dispose()

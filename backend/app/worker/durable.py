@@ -164,6 +164,14 @@ class JobRepository:
 JobHandler = Callable[[Job, ExecutionContext], Awaitable[None]]
 
 
+def safe_error_code(error: BaseException) -> str:
+    """Return a bounded, credential-free failure code for durable job state."""
+    code = getattr(error, "error_code", None)
+    if isinstance(code, str) and code and all(character.isalnum() or character in "_:-." for character in code):
+        return code[:128]
+    return type(error).__name__
+
+
 class DurableJobWorker:
     """Execute each successfully completed claim once while holding its database lease."""
 
@@ -207,7 +215,9 @@ class DurableJobWorker:
         except LeaseLostError:
             raise
         except Exception as error:
-            await self._repository.fail(job, self._worker_id, type(error).__name__, permanent=False)
+            # Sanitized operator-facing code: an explicit ``error_code`` attribute
+            # (never the exception message, which may contain a URI) or the type.
+            await self._repository.fail(job, self._worker_id, safe_error_code(error), permanent=False)
         finally:
             heartbeat.cancel()
             tasks: list[asyncio.Task[object]] = [heartbeat]

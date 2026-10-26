@@ -1,33 +1,107 @@
-import { FormEvent, useState } from "react";
-import { Link, Route, Routes, useNavigate } from "react-router-dom";
-import ResourcePage from "./api/ResourcePage";
-import { CreateRunPage, RunDetailPage, RunsPage } from "./runs/LiveRuns";
-import type { ApiPath } from "./api/openapi.generated";
+import Mark from "./ui/Mark";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { lazy, Suspense, type ReactNode } from "react";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { api, logout } from "./api/client";
+import { readSession } from "./lib/session";
+import Approvals from "./pages/Approvals";
+import Ledger from "./pages/Ledger";
+import Login from "./pages/Login";
+import NewRun from "./pages/NewRun";
+import Overview from "./pages/Overview";
+import Runs from "./pages/Runs";
+import System from "./pages/System";
+import TargetDetail from "./pages/TargetDetail";
 
-const pages: readonly [string, string, ApiPath][] = [
-  ["Home", "/", "/api/v1/system"], ["Targets", "/targets", "/api/v1/targets"],
-  ["Workloads", "/workloads", "/api/v1/workloads"], ["Query shapes", "/query-shapes", "/api/v1/query-shapes"],
-  ["Runs", "/runs", "/api/v1/runs"], ["Approvals", "/approvals", "/api/v1/approvals"],
-  ["Ledger", "/ledger", "/api/v1/ledger"], ["Experience", "/experience", "/api/v1/experience"],
-  ["Benchmarks", "/benchmarks", "/api/v1/benchmarks"], ["Settings", "/settings", "/api/v1/settings"],
-  ["System", "/system", "/api/v1/system"],
+// The run evidence view carries the charting library; load it on demand.
+const RunDetail = lazy(() => import("./pages/RunDetail"));
+import Targets from "./pages/Targets";
+
+const NAV: readonly { to: string; label: string; icon: ReactNode }[] = [
+  { to: "/", label: "Overview", icon: <path d="M3 10.5 10 4l7 6.5V17h-4.5v-4.5h-5V17H3z" /> },
+  { to: "/targets", label: "Targets", icon: <><ellipse cx="10" cy="5" rx="6" ry="2.4" /><path d="M4 5v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4" /></> },
+  { to: "/runs", label: "Runs", icon: <path d="M3 10h3l2-5 4 10 2-5h3" /> },
+  { to: "/approvals", label: "Approvals", icon: <path d="M4 10.5 8 14l8-8" /> },
+  { to: "/ledger", label: "Ledger", icon: <path d="M5 3h10v14H5zM8 7h4M8 10h4M8 13h2" /> },
+  { to: "/system", label: "System", icon: <><circle cx="10" cy="10" r="2.6" /><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6" /></> },
 ];
 
-function Login() {
+
+function Shell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  async function submit(event: FormEvent) {
-    event.preventDefault(); setError("");
-    const response = await fetch("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
-    if (!response.ok) { setError("Login failed."); return; }
-    const tokens = await response.json() as { access_token: string; refresh_token: string };
-    window.localStorage.setItem("access_token", tokens.access_token); window.localStorage.setItem("refresh_token", tokens.refresh_token); navigate("/");
+  const client = useQueryClient();
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, staleTime: 60_000 });
+  const inbox = useQuery({ queryKey: ["inbox"], queryFn: api.inbox, refetchInterval: 15_000, enabled: me.isSuccess });
+  async function signOut() {
+    await logout();
+    client.clear();
+    navigate("/login");
   }
-  return <main className="mx-auto max-w-md p-10"><h1 className="text-3xl font-semibold">Login</h1><form className="mt-6 grid gap-4" onSubmit={submit}><input aria-label="Email" className="rounded border p-2" onChange={(event) => setEmail(event.target.value)} placeholder="Email" required type="email" value={email} /><input aria-label="Password" className="rounded border p-2" minLength={12} onChange={(event) => setPassword(event.target.value)} placeholder="Password" required type="password" value={password} /><button className="rounded bg-blue-700 p-2 text-white" type="submit">Sign in</button>{error && <p className="text-red-700">{error}</p>}</form></main>;
+  return (
+    <div className="min-h-screen md:grid md:grid-cols-[232px_1fr] md:bg-[linear-gradient(to_right,var(--ink-1)_231px,var(--line-soft)_231px,var(--line-soft)_232px,transparent_232px)]">
+      <aside className="border-b border-[var(--line-soft)] bg-[var(--ink-1)] md:sticky md:top-0 md:flex md:h-screen md:flex-col md:border-b-0 md:border-r">
+        <div className="flex items-center gap-2.5 px-4 py-4">
+          <Mark />
+          <div className="leading-tight">
+            <p className="font-semibold">NoSQL Optimizer</p>
+            <p className="text-xs faint">MongoDB control plane</p>
+          </div>
+        </div>
+        <nav aria-label="Primary" className="flex flex-wrap gap-1 px-3 pb-3 md:grid md:pb-0">
+          {NAV.map((item) => (
+            <NavLink key={item.to} to={item.to} end={item.to === "/"} className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}>
+              <svg viewBox="0 0 20 20" className="h-[18px] w-[18px] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{item.icon}</svg>
+              <span className="flex-1">{item.label}</span>
+              {item.to === "/approvals" && (inbox.data?.pending ?? 0) > 0 && <span className="rounded-full bg-[var(--warn)] px-1.5 text-xs font-semibold text-[#2b1a00]" aria-label={`${inbox.data?.pending} pending`}>{inbox.data?.pending}</span>}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="border-t border-[var(--line-soft)] px-4 py-3 md:mt-auto">
+          {me.data ? (
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm" title={me.data.email}>{me.data.email || "Signed in"}</p>
+                <p className="text-xs faint">{me.data.role.charAt(0) + me.data.role.slice(1).toLowerCase()}</p>
+              </div>
+              <button className="btn btn-ghost h-8 px-2 text-sm" onClick={signOut} type="button">Sign out</button>
+            </div>
+          ) : <NavLink to="/login" className="text-sm">Sign in</NavLink>}
+        </div>
+      </aside>
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+function RequireSession({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const { accessToken, refreshToken } = readSession();
+  if (!accessToken && !refreshToken) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  return <>{children}</>;
 }
 
 export default function App() {
-  return <><nav className="border-b border-slate-200 bg-white px-6 py-3 text-sm font-medium"><div className="mx-auto flex max-w-6xl flex-wrap gap-5">{pages.map(([label, to]) => <Link className="text-slate-700 hover:text-blue-700" key={to} to={to}>{label}</Link>)}<Link className="text-slate-700 hover:text-blue-700" to="/login">Login</Link></div></nav><Routes><Route path="/login" element={<Login />} /><Route path="/runs" element={<RunsPage />} /><Route path="/runs/new" element={<CreateRunPage />} /><Route path="/runs/:id" element={<RunDetailPage />} />{pages.filter(([, route]) => route !== "/runs").map(([title, route, path]) => <Route element={<ResourcePage title={title} path={path} />} key={route} path={route} />)}<Route element={<ResourcePage title="Target" path="/api/v1/targets" />} path="/targets/:id" /></Routes></>;
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="*" element={
+        <RequireSession>
+          <Shell>
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/targets" element={<Targets />} />
+              <Route path="/targets/:id" element={<TargetDetail />} />
+              <Route path="/runs" element={<Runs />} />
+              <Route path="/runs/new" element={<NewRun />} />
+              <Route path="/runs/:id" element={<Suspense fallback={<p className="p-8 muted">Loading run…</p>}><RunDetail /></Suspense>} />
+              <Route path="/approvals" element={<Approvals />} />
+              <Route path="/ledger" element={<Ledger />} />
+              <Route path="/system" element={<System />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Shell>
+        </RequireSession>
+      } />
+    </Routes>
+  );
 }

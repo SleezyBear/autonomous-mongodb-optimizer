@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.approvals.durable import DurableApprovalRequired, DurableApprovalService
 from app.auth.routes import current_principal
@@ -15,6 +15,8 @@ from app.auth.security import AuthorizationError, Principal, Role, require_appro
 from app.autonomy.policy import DeploymentMode
 from app.db import models
 from app.runs.service import OptimizationRunCreationService
+from app.api.evidence import run_evidence
+from app.settings_store import WORKER_SCOPE, WORKER_STATUS_KEY, read_setting
 
 
 class ApiGroup(str, Enum):
@@ -52,7 +54,8 @@ class TargetCreate(BaseModel):
 class RunCreate(BaseModel):
     target_id: UUID
     deployment_mode: DeploymentMode = DeploymentMode.APPROVAL_CONTROLLED
-    primary_metric_key: str | None = Field(default=None, max_length=256)
+    # Calibration requires a primary metric; default to protected p99 latency.
+    primary_metric_key: str | None = Field(default="p99_latency_ms", max_length=256)
 
 
 class RunResponse(BaseModel):
@@ -64,6 +67,10 @@ class RunResponse(BaseModel):
     completion_reason: str | None
     created_at: datetime
     updated_at: datetime
+    target_name: str | None = None
+    job_status: str | None = None
+    job_attempts: int | None = None
+    last_error_code: str | None = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -109,14 +116,18 @@ async def _list(
         from sqlalchemy import text
 
         engine = request.app.state.control_plane.ledger._engine
+        scoped = principal.role not in {Role.ADMIN, Role.APPROVER}
         async with engine.connect() as connection:
             rows = (
                 (
                     await connection.execute(
                         text(
-                            "SELECT * FROM production_ledger_entries ORDER BY created_at LIMIT :limit OFFSET :offset"
+                            "SELECT l.*, t.name AS target_name FROM production_ledger_entries l "
+                            "JOIN targets t ON t.id = l.target_id "
+                            + ("WHERE t.owner_user_id = :owner " if scoped else "")
+                            + "ORDER BY l.created_at DESC, l.sequence DESC LIMIT :limit OFFSET :offset"
                         ),
-                        {"limit": limit, "offset": offset},
+                        {"limit": limit, "offset": offset, **({"owner": UUID(principal.user_id)} if scoped else {})},
                     )
                 )
                 .mappings()
@@ -127,7 +138,7 @@ async def _list(
         request.app.state.control_plane, "targets" if group is ApiGroup.TARGETS else _REPOS[group]
     )
     rows = await repository.list()
-    if group is ApiGroup.TARGETS:
+    if group is ApiGroup.TARGETS and principal.role not in {Role.ADMIN, Role.APPROVER}:
         rows = tuple(row for row in rows if str(row["owner_user_id"]) == principal.user_id)
     return Page(
         group=group,
@@ -184,12 +195,36 @@ async def _authorized_target(
     return dict(target)
 
 
-def _run_response(row: dict[str, Any]) -> RunResponse:
+def _run_response(row: dict[str, Any], extras: dict[str, Any] | None = None) -> RunResponse:
+    extras = extras or {}
     return RunResponse(
         run_id=row["id"], target_id=row["target_id"], status=_enum(row["status"]) or "UNKNOWN",
         deployment_mode=str(row["deployment_mode"]), primary_metric_key=row["primary_metric_key"],
         completion_reason=_enum(row["completion_reason"]), created_at=row["created_at"], updated_at=row["updated_at"],
+        target_name=extras.get("target_name"), job_status=extras.get("job_status"),
+        job_attempts=extras.get("job_attempts"), last_error_code=extras.get("last_error_code"),
     )
+
+
+async def _run_extras(connection: Any, run_ids: list[Any]) -> dict[Any, dict[str, Any]]:
+    """Target names and the latest durable job state for each run."""
+    if not run_ids:
+        return {}
+    runs, targets, jobs = models.OptimizationRun.__table__, models.Target.__table__, models.Job.__table__
+    names = dict((await connection.execute(select(runs.c.id, targets.c.name).join(targets, targets.c.id == runs.c.target_id).where(runs.c.id.in_(run_ids)))).all())
+    job_rows = (await connection.execute(select(jobs.c.optimization_run_id, jobs.c.status, jobs.c.attempts, jobs.c.last_error_code, jobs.c.created_at).where(jobs.c.optimization_run_id.in_(run_ids)).order_by(jobs.c.created_at))).mappings().all()
+    latest: dict[Any, Any] = {}
+    for job in job_rows:
+        latest[job["optimization_run_id"]] = job
+    return {
+        run_id: {
+            "target_name": names.get(run_id),
+            "job_status": latest[run_id]["status"] if run_id in latest else None,
+            "job_attempts": latest[run_id]["attempts"] if run_id in latest else None,
+            "last_error_code": latest[run_id]["last_error_code"] if run_id in latest else None,
+        }
+        for run_id in run_ids
+    }
 
 
 @router.post("/runs", response_model=RunResponse, status_code=201)
@@ -199,7 +234,9 @@ async def create_run(body: RunCreate, request: Request, principal: Principal = D
     except AuthorizationError as error:
         raise HTTPException(status_code=403, detail="Operator permission is required.") from error
     target = await _authorized_target(request, body.target_id, principal)
-    if body.primary_metric_key is not None and body.primary_metric_key not in _PRIMARY_METRICS:
+    if body.primary_metric_key is None:
+        raise HTTPException(status_code=422, detail="A primary metric is required; the run cannot be calibrated without one.")
+    if body.primary_metric_key not in _PRIMARY_METRICS:
         raise HTTPException(status_code=422, detail="Primary metric is not supported.")
     if not target["is_active"] or target["state"] != "ACTIVE":
         raise HTTPException(status_code=409, detail="Target is not active.")
@@ -231,8 +268,21 @@ async def list_runs(
         raise HTTPException(status_code=422, detail="invalid pagination")
     engine = request.app.state.control_plane.runs._engine
     statement = select(models.OptimizationRun.__table__).order_by(models.OptimizationRun.__table__.c.created_at.desc(), models.OptimizationRun.__table__.c.id)
-    if principal.role is not Role.ADMIN:
-        statement = statement.where(models.OptimizationRun.__table__.c.requested_by_user_id == UUID(principal.user_id))
+    runs_table = models.OptimizationRun.__table__
+    if principal.role is Role.APPROVER:
+        # Same visibility as GET /runs/{id}: own runs, runs awaiting (or whose approval lapsed), runs this approver decided.
+        approvals = models.ApprovalRequest.__table__
+        decisions = models.ApprovalDecision.__table__
+        pending = select(approvals.c.id).where(approvals.c.optimization_run_id == runs_table.c.id, approvals.c.status.in_(("PENDING", "EXPIRED"))).exists()
+        decided = (
+            select(decisions.c.id)
+            .join(approvals, approvals.c.id == decisions.c.approval_request_id)
+            .where(approvals.c.optimization_run_id == runs_table.c.id, decisions.c.decided_by_user_id == UUID(principal.user_id))
+            .exists()
+        )
+        statement = statement.where(or_(runs_table.c.requested_by_user_id == UUID(principal.user_id), pending, decided))
+    elif principal.role is not Role.ADMIN:
+        statement = statement.where(runs_table.c.requested_by_user_id == UUID(principal.user_id))
     if target_id is not None:
         await _authorized_target(request, target_id, principal)
         statement = statement.where(models.OptimizationRun.__table__.c.target_id == target_id)
@@ -245,7 +295,8 @@ async def list_runs(
         statement = statement.where(models.OptimizationRun.__table__.c.deployment_mode == deployment_mode.value)
     async with engine.connect() as connection:
         rows = (await connection.execute(statement.limit(limit).offset(offset))).mappings().all()
-    return Page(group=ApiGroup.RUNS, records=[_run_response(dict(row)).model_dump(mode="json") for row in rows], limit=limit, offset=offset)
+        extras = await _run_extras(connection, [row["id"] for row in rows])
+    return Page(group=ApiGroup.RUNS, records=[_run_response(dict(row), extras.get(row["id"])).model_dump(mode="json") for row in rows], limit=limit, offset=offset)
 
 
 @router.get("/runs/{run_id}")
@@ -260,7 +311,7 @@ async def get_run(run_id: UUID, request: Request, principal: Principal = Depends
             approver_access = await connection.scalar(
                 select(models.ApprovalRequest.__table__.c.id).where(
                     models.ApprovalRequest.__table__.c.optimization_run_id == run_id,
-                    models.ApprovalRequest.__table__.c.status == "PENDING",
+                    models.ApprovalRequest.__table__.c.status.in_(("PENDING", "EXPIRED")),
                 )
             )
             if approver_access is None:
@@ -308,7 +359,9 @@ async def get_run(run_id: UUID, request: Request, principal: Principal = Depends
         if artifacts["deployment"] is not None:
             rollback = (await connection.execute(select(models.RollbackRecord.__table__).where(models.RollbackRecord.__table__.c.candidate_id == artifacts["deployment"]["candidate_id"]))).mappings().one_or_none()
             artifacts["rollback"] = _record(rollback) if rollback is not None else None
-    return {"run": _run_response(dict(run)).model_dump(mode="json"), "artifacts": artifacts}
+        evidence = await run_evidence(connection, dict(run), artifacts)
+        extras = (await _run_extras(connection, [run_id])).get(run_id)
+    return {"run": _run_response(dict(run), extras).model_dump(mode="json"), "artifacts": artifacts, "evidence": evidence}
 
 
 @router.get("/approvals", response_model=Page)
@@ -334,7 +387,7 @@ async def _decide_approval(approval_id: UUID, body: ApprovalDecisionRequest, req
     try:
         require_approval_authority(principal, str(approval["requested_by_user_id"]))
         service = DurableApprovalService(engine)
-        result = await (service.approve_and_enqueue_continuation(approval_id, UUID(principal.user_id)) if approve else service.reject_and_complete_run(approval_id, UUID(principal.user_id), body.reason))
+        result = await (service.approve_and_enqueue_continuation(approval_id, UUID(principal.user_id), body.reason) if approve else service.reject_and_complete_run(approval_id, UUID(principal.user_id), body.reason))
     except (AuthorizationError, DurableApprovalRequired) as error:
         raise HTTPException(status_code=403 if isinstance(error, AuthorizationError) else 409, detail="Approval cannot be applied.") from error
     return _record(result)
@@ -350,14 +403,62 @@ async def reject(approval_id: UUID, body: ApprovalDecisionRequest, request: Requ
     return await _decide_approval(approval_id, body, request, principal, approve=False)
 
 
+PRODUCTION_ROLES = frozenset({"observer", "executor"})
+
+
+def connection_kind(roles: object) -> str | None:
+    """Classify a worker-published connection: PRODUCTION (observer+executor), SANDBOX, or None."""
+    role_set = {str(role) for role in roles} if isinstance(roles, (list, tuple, set, frozenset)) else set()
+    if PRODUCTION_ROLES <= role_set:
+        return "PRODUCTION"
+    if "sandbox" in role_set:
+        return "SANDBOX"
+    return None
+
+
+async def worker_connection_roles(request: Request) -> dict[str, list[str]] | None:
+    """Labels the worker published, with their roles; None when the worker has never reported."""
+    status = await read_setting(request.app.state.control_plane.runs._engine, WORKER_SCOPE, WORKER_STATUS_KEY)
+    if not status or not isinstance(status.get("connections"), list):
+        return None
+    return {str(item.get("label")): list(item.get("roles", [])) for item in status["connections"] if isinstance(item, dict)}
+
+
+async def require_known_label(request: Request, label: str) -> None:
+    """Reject a label the worker does not have, naming the ones it does."""
+    known = await worker_connection_roles(request)
+    if known and label not in known:
+        options = ", ".join(f"{name} ({'sandbox only' if connection_kind(roles) == 'SANDBOX' else 'production'})" for name, roles in sorted(known.items()))
+        raise HTTPException(status_code=422, detail=f"Connection label '{label}' is not configured on the worker. Choose one of: {options}.")
+
+
+async def require_unique_target_name(request: Request, owner_user_id: str, name: str, *, exclude: UUID | None = None) -> None:
+    table = models.Target.__table__
+    statement = select(table.c.id).where(table.c.owner_user_id == UUID(owner_user_id), table.c.name == name)
+    if exclude is not None:
+        statement = statement.where(table.c.id != exclude)
+    async with request.app.state.control_plane.runs._engine.connect() as connection:
+        if await connection.scalar(statement.limit(1)):
+            raise HTTPException(status_code=409, detail=f"You already have a target named '{name}'. Choose another name, or edit that target instead.")
+
+
 @router.post("/targets", response_model=dict[str, Any])
 async def create_target(
     body: TargetCreate, request: Request, principal: Principal = Depends(current_principal)
 ) -> dict[str, Any]:
+    try:
+        require_role(principal, Role.OPERATOR, Role.ADMIN)
+    except AuthorizationError as error:
+        raise HTTPException(status_code=403, detail="Operator permission is required.") from error
+    name, label = body.name.strip(), body.connection_label.strip()
+    if not name or not label:
+        raise HTTPException(status_code=422, detail="Name and connection label are required.")
+    await require_known_label(request, label)
+    await require_unique_target_name(request, principal.user_id, name)
     created = await request.app.state.control_plane.targets.create(
         owner_user_id=UUID(principal.user_id),
-        name=body.name,
-        connection_label=body.connection_label,
+        name=name,
+        connection_label=label,
         deployment_mode=body.deployment_mode.value,
         state="ACTIVE",
         is_active=True,

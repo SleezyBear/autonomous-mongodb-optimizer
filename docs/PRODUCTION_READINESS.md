@@ -61,6 +61,7 @@ outstanding.
 | R26 — concurrency/load/soak qualification | COMPLETE — INTEGRATION_PASS | Concurrency qualification passed 27 tests. The 60-second soak passed with 4,444 API samples, zero failures, p95 90.83 ms, bounded PostgreSQL/MongoDB connections, and no post-cleanup asyncio/client leak. |
 | R27 — autonomy readiness | COMPLETE — INTEGRATION_PASS | Explicit autonomy/production/monitoring/experience/rollback/reversion recheck passed 46/46, including predeployment evidence binding, autonomy eligibility, mandatory monitoring, ownership-safe rollback, and experience non-authority. |
 | R28 — research/reproducibility closure | NOT STARTED | CommerceBench/NoSQLBench publication runs, B0–B5 ablations, raw exports, figures/tables, manifests, and final reproducibility/final-acceptance closure remain. |
+| R29 — operational wiring and operator console | IMPLEMENTED — INTEGRATION_PASS (PostgreSQL + in-memory Mongo double); real-MongoDB verification pending | The Compose worker now composes every stage per run from a worker-only connection file; a read-only telemetry collector, sandbox evaluator with replay and result-correctness checks, live monitoring probes, operator onboarding/read-model APIs, migration 0024 (overlapping snapshot observations), and the rebuilt operator console. `backend/tests/worker/test_production_pipeline.py` drives API → worker → approval → deployment → monitoring/rollback end to end. |
 
 ## Qualification rule
 

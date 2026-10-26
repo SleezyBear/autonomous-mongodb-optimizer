@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from uuid import UUID
 
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.admission.models import AdmissionRequest, AdmissionStatus
 from app.admission.statistics import evaluate_candidate_admission
 from app.db import models
-from app.db.repositories import AdmissionArtifactRepository, AdmissionRepository
+from app.db.repositories import AdmissionArtifactRepository, AdmissionRepository, SafetyRepository
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,16 @@ class DurableAdmissionService:
             for candidate_id in ranked:
                 result = evaluate_candidate_admission(requests[candidate_id])
                 evidence[str(candidate_id)] = asdict(result)
-                await AdmissionRepository(self._engine).create_in_transaction(connection, candidate_id=candidate_id, verdict=result.status.value, evidence_hash=_hash(asdict(result)))
+                decision = await AdmissionRepository(self._engine).create_in_transaction(connection, candidate_id=candidate_id, verdict=result.status.value, evidence_hash=_hash(asdict(result)))
+                # Persist the full per-metric evidence (confidence bounds, pair
+                # counts, reasons) so operators can audit the verdict later.
+                await SafetyRepository(self._engine).create_in_transaction(
+                    connection,
+                    admission_decision_id=decision["id"],
+                    check_name="STATISTICAL_ADMISSION",
+                    verdict=result.status.value,
+                    details=_finite(json.loads(json.dumps(asdict(result), sort_keys=True, default=_json_default))),
+                )
                 if result.status is AdmissionStatus.ADMITTED:
                     admitted.append(candidate_id)
                     production_eligible_by_candidate[candidate_id] = result.production_eligible
@@ -58,6 +68,21 @@ class DurableAdmissionService:
             production_eligible = bool(selected is not None and production_eligible_by_candidate.get(selected, False))
             row = await AdmissionArtifactRepository(self._engine).create_in_transaction(connection, optimization_run_id=run_id, evaluation_plan_id=plan["id"], selected_candidate_id=selected, admitted_candidate_ids=[str(candidate_id) for candidate_id in admitted], production_eligible=production_eligible, artifact_fingerprint=_hash({"run_id": str(run_id), "plan": str(plan["id"]), "results": evidence, "selected": str(selected) if selected else None, "production_eligible": production_eligible}))
             return DurableAdmissionResult(row["id"], selected, tuple(admitted), production_eligible)
+
+
+def _finite(value: object) -> object:
+    """PostgreSQL JSONB rejects NaN/Infinity; persist them as null."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite(item) for item in value]
+    return value
+
+
+def _json_default(value: object) -> object:
+    return value.value if hasattr(value, "value") else str(value)
 
 
 def _hash(value: object) -> str:

@@ -1,0 +1,11 @@
+{
+  "mongo-monitored": {
+    "observer_uri": "mongodb://optimizer_observer:observer_dev_only@mongo-monitored:27017/?authSource=admin&directConnection=true",
+    "executor_uri": "mongodb://optimizer_executor:executor_dev_only@mongo-monitored:27017/?authSource=admin&directConnection=true",
+    "database": "commerce"
+  },
+  "mongo-evaluation": {
+    "sandbox_uri": "mongodb://control_plane_root:control_plane_root_dev_only@mongo-evaluation:27017/?authSource=admin&directConnection=true",
+    "database": "commerce"
+  }
+}

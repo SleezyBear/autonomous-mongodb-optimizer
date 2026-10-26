@@ -15,6 +15,9 @@ RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels -r requ
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 COPY --chown=app:app backend/app /app/app
+# Alembic migrations run from this image as the one-shot `migrate` service.
+COPY --chown=app:app backend/alembic /app/backend/alembic
+COPY --chown=app:app backend/alembic.ini /app/backend/alembic.ini
 
 USER 10001:10001
 EXPOSE 8000

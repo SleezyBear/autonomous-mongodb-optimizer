@@ -138,8 +138,9 @@ async def logout(body: RefreshRequest, request: Request) -> dict[str, str]:
 
 
 @router.get("/auth/me")
-async def me(principal: Principal = Depends(current_principal)) -> dict[str, str]:
-    return {"user_id": principal.user_id, "role": principal.role.value}
+async def me(request: Request, principal: Principal = Depends(current_principal)) -> dict[str, str]:
+    user = await request.app.state.control_plane.users.get(principal.user_id)
+    return {"user_id": principal.user_id, "role": principal.role.value, "email": str(user["email"]) if user else ""}
 
 
 @router.post("/operations/execute")

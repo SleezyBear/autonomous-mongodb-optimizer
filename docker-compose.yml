@@ -25,7 +25,7 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: control_plane_root
       MONGO_INITDB_ROOT_PASSWORD: control_plane_root_dev_only
-    command: ["mongod", "--replSet", "rs-monitored", "--bind_ip_all", "--auth", "--keyFile", "/tmp/mongodb-replica-keyfile"]
+    command: ["mongod", "--replSet", "rs-monitored", "--bind_ip_all", "--auth", "--keyFile", "/tmp/mongodb-replica-keyfile", "--slowms", "${MONGO_SLOWMS:-5}"]
     secrets:
       - source: mongodb_replica_keyfile
         target: mongodb_replica_keyfile
@@ -81,6 +81,24 @@ services:
       - ./infra/mongo/init-replica-set.sh:/init-replica-set.sh:ro
     entrypoint: ["/bin/sh", "/init-replica-set.sh", "mongo-evaluation", "rs-evaluation"]
 
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    platform: linux/amd64
+    profiles: ["light", "replica-test", "paper"]
+    command: ["python", "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://control_plane:control_plane_dev_only@postgres:5432/${POSTGRES_DB:-control_plane}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+
   api:
     build:
       context: .
@@ -96,6 +114,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     secrets:
       - source: control_plane_master_key
         target: control_plane_master_key
@@ -120,15 +140,29 @@ services:
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql+asyncpg://control_plane:control_plane_dev_only@postgres:5432/${POSTGRES_DB:-control_plane}
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY in your environment or .env file}
+      # Mongo credentials live only in this worker-mounted secret, never in the API.
+      TARGET_CONNECTIONS_FILE: /run/secrets/target_connections
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-gemma4:e4b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-embeddinggemma}
+      TELEMETRY_INTERVAL_SECONDS: ${TELEMETRY_INTERVAL_SECONDS:-30}
+      MONITORING_WINDOW_SECONDS: ${MONITORING_WINDOW_SECONDS:-20}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     profiles: ["light", "replica-test", "paper"]
     restart: unless-stopped
     stop_grace_period: 45s
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     secrets:
       - source: control_plane_master_key
         target: control_plane_master_key
+      - source: target_connections
+        target: target_connections
     healthcheck:
       test: ["CMD-SHELL", "python -m app.worker.service --healthcheck"]
       interval: 5s
@@ -179,3 +213,5 @@ secrets:
     file: ${CONTROL_PLANE_MASTER_KEY_FILE:-./.secrets/control_plane_master_key}
   mongodb_replica_keyfile:
     file: ${MONGODB_REPLICA_KEYFILE:-./.secrets/mongodb_replica_keyfile}
+  target_connections:
+    file: ${TARGET_CONNECTIONS_HOST_FILE:-./infra/dev/target_connections.json}

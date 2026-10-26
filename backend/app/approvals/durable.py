@@ -51,7 +51,7 @@ class DurableApprovalService:
             approved = await connection.execute(select(models.ApprovalRequest.__table__).where(models.ApprovalRequest.id == approval_id))
             return approved.mappings().one()
 
-    async def approve_and_enqueue_continuation(self, approval_id: UUID, approver_id: UUID) -> RowMapping:
+    async def approve_and_enqueue_continuation(self, approval_id: UUID, approver_id: UUID, reason: str | None = None) -> RowMapping:
         """Approve an exact request and atomically create/reuse its one continuation job."""
         now = datetime.now(timezone.utc)
         async with self._engine.begin() as connection:
@@ -64,7 +64,7 @@ class DurableApprovalService:
             if run is None or _value(run["status"]) != models.RunStatus.APPROVAL_PENDING.value:
                 raise DurableApprovalRequired("run is not awaiting this approval")
             await connection.execute(update(models.ApprovalRequest.__table__).where(models.ApprovalRequest.id == approval_id).values(status="APPROVED", updated_at=now))
-            await connection.execute(insert(models.ApprovalDecision.__table__).values(id=uuid4(), created_at=now, updated_at=now, approval_request_id=approval_id, decided_by_user_id=approver_id, decision="APPROVED", reason=None))
+            await connection.execute(insert(models.ApprovalDecision.__table__).values(id=uuid4(), created_at=now, updated_at=now, approval_request_id=approval_id, decided_by_user_id=approver_id, decision="APPROVED", reason=reason))
             await connection.execute(update(models.OptimizationRun.__table__).where(models.OptimizationRun.id == request["optimization_run_id"]).values(status=models.RunStatus.APPROVED, updated_at=now))
             await connection.execute(text("INSERT INTO jobs (id, created_at, updated_at, payload, status, attempts, optimization_run_id, kind) VALUES (:id, :now, :now, CAST(:payload AS jsonb), 'PENDING', 0, :run_id, 'OPTIMIZATION') ON CONFLICT DO NOTHING"), {"id": uuid4(), "now": now, "run_id": request["optimization_run_id"], "payload": '{\"continuation\": \"true\"}'})
             return (await connection.execute(select(models.ApprovalRequest.__table__).where(models.ApprovalRequest.id == approval_id))).mappings().one()
@@ -85,6 +85,37 @@ class DurableApprovalService:
             await connection.execute(insert(models.ApprovalDecision.__table__).values(id=uuid4(), created_at=now, updated_at=now, approval_request_id=approval_id, decided_by_user_id=approver_id, decision="REJECTED", reason=reason))
             await connection.execute(update(models.OptimizationRun.__table__).where(models.OptimizationRun.id == request["optimization_run_id"]).values(status=models.RunStatus.COMPLETED, completion_reason=models.RunCompletionReason.APPROVAL_REJECTED, updated_at=now))
             return (await connection.execute(select(models.ApprovalRequest.__table__).where(models.ApprovalRequest.id == approval_id))).mappings().one()
+
+    async def expire_overdue(self, *, now: datetime | None = None) -> list[UUID]:
+        """Close pending approvals past their deadline and complete their runs without mutation.
+
+        Returns the ids of runs that were completed with ``APPROVAL_EXPIRED``.
+        """
+        now = now or datetime.now(timezone.utc)
+        requests = models.ApprovalRequest.__table__
+        runs = models.OptimizationRun.__table__
+        completed: list[UUID] = []
+        async with self._engine.begin() as connection:
+            overdue = (await connection.execute(
+                select(requests.c.id, requests.c.optimization_run_id)
+                .where(requests.c.status == "PENDING", requests.c.expires_at <= now)
+                .with_for_update(skip_locked=True)
+            )).mappings().all()
+            for request in overdue:
+                await connection.execute(update(requests).where(requests.c.id == request["id"]).values(status="EXPIRED", updated_at=now))
+                if request["optimization_run_id"] is None:
+                    continue
+                run = (await connection.execute(
+                    select(runs.c.id, runs.c.status).where(runs.c.id == request["optimization_run_id"]).with_for_update()
+                )).mappings().one_or_none()
+                if run is not None and _value(run["status"]) == models.RunStatus.APPROVAL_PENDING.value:
+                    await connection.execute(
+                        update(runs).where(runs.c.id == run["id"]).values(
+                            status=models.RunStatus.COMPLETED, completion_reason=models.RunCompletionReason.APPROVAL_EXPIRED, updated_at=now
+                        )
+                    )
+                    completed.append(UUID(str(run["id"])))
+        return completed
 
     async def require_current(self, *, action_id: str, target_id: UUID, candidate_id: UUID, evidence_hash: str) -> RowMapping:
         now = datetime.now(timezone.utc)

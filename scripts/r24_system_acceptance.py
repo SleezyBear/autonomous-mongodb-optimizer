@@ -1030,9 +1030,6 @@ async def _main() -> None:
         await qualification.qualify_query_settings(success)
         await qualification.run_path("autonomous_success", mode="FULL_AUTONOMOUS")
         await qualification.run_path(
-            "autonomy_fallback", mode="FULL_AUTONOMOUS", current_op=True
-        )
-        await qualification.run_path(
             "monitoring_regression",
             approval="approve",
             monitoring="regression",
@@ -1040,6 +1037,11 @@ async def _main() -> None:
         )
         await qualification.run_path(
             "rollback_drift", approval="approve", monitoring="drift_blocked"
+        )
+        # Last, so its 15-minute approval window is still open when the
+        # Playwright stage approves it through the console.
+        await qualification.run_path(
+            "autonomy_fallback", mode="FULL_AUTONOMOUS", current_op=True
         )
         await qualification.verify()
         _write_playwright_env(

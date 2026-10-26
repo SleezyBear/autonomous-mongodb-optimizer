@@ -21,9 +21,12 @@ if [ "$mongo_host" = "mongo-monitored" ]; then
     // The declared role definitions are authoritative for both new and existing
     // databases: create when absent, reconcile (updateRole) when present so a
     // retained volume converges to the same privileges as a fresh environment.
+    // Read-only telemetry: slow-query log, in-progress ops, $queryStats, and an
+    // already-enabled profiler.  The observer can never write application data.
     const observerPrivileges = [
-      {resource: {cluster: true}, actions: ["serverStatus", "replSetGetStatus", "getParameter", "listDatabases"]},
+      {resource: {cluster: true}, actions: ["serverStatus", "replSetGetStatus", "getParameter", "listDatabases", "getLog", "inprog", "queryStatsRead"]},
       {resource: {db: "commerce", collection: ""}, actions: ["find", "listCollections", "listIndexes", "collStats", "dbStats"]},
+      {resource: {db: "commerce", collection: "system.profile"}, actions: ["find"]},
       {resource: {db: "admin", collection: ""}, actions: ["enableProfiler"]}
     ];
     const executorPrivileges = [
