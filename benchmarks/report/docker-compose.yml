@@ -1,0 +1,68 @@
+# Benchmark environment for the final report (Chapters 8 to 10).
+# Every service is opt-in through a profile so only the databases under test run at once.
+name: nosqlreport
+
+x-mongo: &mongo
+  image: mongo:8.0
+  restart: "no"
+
+services:
+  client:
+    build: .
+    profiles: ["client"]
+    volumes:
+      - ./:/bench
+      - ../../artifacts/report-bench:/results
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      RESULTS_DIR: /results
+      SCALES: ${SCALES:-10000,100000,1000000,10000000}
+
+  # Single MongoDB node: the system under test for most experiments.
+  mongo:
+    <<: *mongo
+    profiles: ["mongo"]
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1.5"]
+
+  # Three-member replica set for consistency, replication lag and failover.
+  rs1: { <<: *mongo, profiles: ["rs"], command: ["mongod", "--bind_ip_all", "--replSet", "rsb", "--wiredTigerCacheSizeGB", "0.5"] }
+  rs2: { <<: *mongo, profiles: ["rs"], command: ["mongod", "--bind_ip_all", "--replSet", "rsb", "--wiredTigerCacheSizeGB", "0.5"] }
+  rs3: { <<: *mongo, profiles: ["rs"], command: ["mongod", "--bind_ip_all", "--replSet", "rsb", "--wiredTigerCacheSizeGB", "0.5"] }
+
+  # Sharded cluster: config server, four single-member shards and a mongos router.
+  cfg: { <<: *mongo, profiles: ["shard"], command: ["mongod", "--bind_ip_all", "--configsvr", "--replSet", "cfg", "--port", "27017", "--wiredTigerCacheSizeGB", "0.25"] }
+  sh1: { <<: *mongo, profiles: ["shard"], command: ["mongod", "--bind_ip_all", "--shardsvr", "--replSet", "sh1", "--port", "27017", "--wiredTigerCacheSizeGB", "0.4"] }
+  sh2: { <<: *mongo, profiles: ["shard"], command: ["mongod", "--bind_ip_all", "--shardsvr", "--replSet", "sh2", "--port", "27017", "--wiredTigerCacheSizeGB", "0.4"] }
+  sh3: { <<: *mongo, profiles: ["shard"], command: ["mongod", "--bind_ip_all", "--shardsvr", "--replSet", "sh3", "--port", "27017", "--wiredTigerCacheSizeGB", "0.4"] }
+  sh4: { <<: *mongo, profiles: ["shard"], command: ["mongod", "--bind_ip_all", "--shardsvr", "--replSet", "sh4", "--port", "27017", "--wiredTigerCacheSizeGB", "0.4"] }
+  mongos:
+    <<: *mongo
+    profiles: ["shard"]
+    restart: on-failure
+    command: ["mongos", "--bind_ip_all", "--configdb", "cfg/cfg:27017"]
+
+  # Relational baseline: same PostgreSQL major version the project already uses.
+  postgres:
+    image: pgvector/pgvector:pg17
+    profiles: ["postgres"]
+    environment: { POSTGRES_PASSWORD: bench, POSTGRES_DB: bench }
+    command: ["postgres", "-c", "shared_buffers=1536MB", "-c", "max_wal_size=4GB", "-c", "synchronous_commit=on"]
+    shm_size: 1g
+
+  cassandra:
+    image: cassandra:4.1
+    profiles: ["cassandra"]
+    environment: { MAX_HEAP_SIZE: 1G, HEAP_NEWSIZE: 256M, CASSANDRA_CLUSTER_NAME: bench }
+
+  neo4j:
+    image: neo4j:5.26-community
+    profiles: ["neo4j"]
+    environment:
+      NEO4J_AUTH: neo4j/benchpassword
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 1G
+
+  redis:
+    image: redis:7.4
+    profiles: ["redis"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]

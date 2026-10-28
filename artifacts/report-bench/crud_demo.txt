@@ -1,0 +1,64 @@
+== CRUD on commerce.orders (mongosh)
+> db.orders.insertOne({ _id: 10000001, customer_id: 1407, status: "pending", region: 3, total_cents: 7449, created_at: new Date(), items: [ { sku: 18342, qty: 1, price_cents: 7449 } ] })
+{
+  acknowledged: true,
+  insertedId: 10000001
+}
+
+> db.orders.find({ customer_id: 1407 }, { items: 0 }).sort({ created_at: -1 }).limit(3)
+[
+  {
+    _id: 10000001,
+    customer_id: 1407,
+    status: 'pending',
+    region: 3,
+    total_cents: 7449,
+    created_at: ISODate('2026-10-28T15:27:57.470Z')
+  },
+  {
+    _id: 114758,
+    customer_id: 1407,
+    status: 'shipped',
+    total_cents: 19498,
+    created_at: ISODate('2026-03-21T16:38:00.000Z'),
+    region: 4
+  },
+  {
+    _id: 114499,
+    customer_id: 1407,
+    status: 'pending',
+    total_cents: 42578,
+    created_at: ISODate('2026-03-21T12:19:00.000Z'),
+    region: 3
+  }
+]
+
+> db.orders.find({ customer_id: 1407 }).sort({ created_at: -1 }).limit(10).explain().queryPlanner.winningPlan
+{
+ "stage": "SORT",
+ "limitAmount": 10,
+ "inputStage": {
+  "stage": "FETCH",
+  "inputStage": {
+   "stage": "IXSCAN",
+   "keyPattern": {},
+   "indexName": "optimizer_33502e7527831095",
+   "indexBounds": {}
+  }
+ }
+}
+
+> db.orders.updateOne({ _id: 10000001 }, { $set: { status: "paid" } })
+{
+  acknowledged: true,
+  insertedId: null,
+  matchedCount: 1,
+  modifiedCount: 1,
+  upsertedCount: 0
+}
+
+> db.orders.deleteOne({ _id: 10000001 })
+{
+  acknowledged: true,
+  deletedCount: 1
+}

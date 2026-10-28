@@ -1,0 +1,11 @@
+date: 2026-10-28T10:44:15Z
+cpu: Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz
+cores: 12
+perf_cores: 6
+memory_bytes: 17179869184
+os: macOS 15.7.9
+model: MacBookPro15,1
+disk: /dev/disk1s1   362Gi   299Gi    46Gi    87%    2.2M  483M    0%   /System/Volumes/Data
+docker: 29.6.1
+docker_cpus: 12
+docker_memory_bytes: 16764555264

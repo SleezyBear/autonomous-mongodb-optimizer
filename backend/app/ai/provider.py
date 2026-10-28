@@ -224,7 +224,7 @@ class OllamaAIProvider(AIProvider):
         for attempt in range(2):
             try:
                 async with self._isolation_lock.ollama_request():
-                    response = await self._client.post("/api/chat", json={"model": self._model, "messages": [{"role": "user", "content": prompt}], "stream": False, "format": output_type.model_json_schema(), "options": {"temperature": 0}}, timeout=self._timeout_seconds)
+                    response = await self._client.post("/api/chat", json={"model": self._model, "messages": [{"role": "user", "content": prompt}], "stream": False, "think": False, "format": output_type.model_json_schema(), "options": {"temperature": 0}}, timeout=self._timeout_seconds)
                     response.raise_for_status()
                     message = response.json().get("message")
                     raw_output = message.get("content") if isinstance(message, dict) else None
